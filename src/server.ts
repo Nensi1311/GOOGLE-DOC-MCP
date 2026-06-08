@@ -32,6 +32,23 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+/** Avoid TS OOM: MCP SDK infers heavy Zod shapes for every tool registration. */
+function registerTool(
+  name: string,
+  params: Record<string, z.ZodTypeAny>,
+  handler: (args: any) => Promise<{ content: Array<{ type: string; text?: string }>; isError?: boolean }>
+): void {
+  server.tool(name, params as never, handler as never);
+}
+
+function registerPrompt(
+  name: string,
+  args: Record<string, z.ZodTypeAny>,
+  handler: (args: any) => { messages: Array<{ role: string; content: { type: string; text: string } }> }
+): void {
+  server.prompt(name, args as never, handler as never);
+}
+
 /**
  * Load saved credentials if they exist, otherwise trigger the OAuth flow
  */
@@ -1508,7 +1525,7 @@ server.resource(
 // TOOLS
 
 // Tool to create a new document
-server.tool(
+registerTool(
   "create-doc",
   {
     title: z.string().describe("The title of the new document"),
@@ -1568,7 +1585,7 @@ server.tool(
 );
 
 // Tool to update an existing document
-server.tool(
+registerTool(
   "update-doc",
   {
     docId: z.string().describe("The ID of the document to update"),
@@ -1689,7 +1706,7 @@ server.tool(
 );
 
 // Tool to apply text formatting (color, bold, font size, etc.)
-server.tool(
+registerTool(
   "format-text",
   {
     docId: z
@@ -1782,7 +1799,7 @@ server.tool(
 );
 
 // Tool for paragraph layout: alignment, line spacing, indents, heading styles
-server.tool(
+registerTool(
   "format-paragraph",
   {
     docId: z
@@ -1986,7 +2003,7 @@ const documentEditOperationSchema = z.discriminatedUnion("type", [
 ]);
 
 // All-in-one document editor: run multiple updates in one call
-server.tool(
+registerTool(
   "edit-document",
   {
     docId: z.string().describe("Document ID. Best for multi-step writer/student formatting workflows."),
@@ -2028,7 +2045,7 @@ server.tool(
 );
 
 // Tool to search for documents
-server.tool(
+registerTool(
   "search-docs",
   {
     query: z.string().describe("The search query to find documents"),
@@ -2097,7 +2114,7 @@ server.tool(
 );
 
 // Tool to delete a document
-server.tool(
+registerTool(
   "delete-doc",
   {
     docId: z.string().describe("The ID of the document to delete"),
@@ -2137,7 +2154,7 @@ server.tool(
 );
 
 // Tool to list all documents
-server.tool(
+registerTool(
   "list-docs",
   {},
   async () => {
@@ -2189,7 +2206,7 @@ server.tool(
 );
 
 // Tool to get a specific document by ID
-server.tool(
+registerTool(
   "get-doc",
   {
     docId: z.string().describe("The ID of the document to retrieve"),
@@ -2243,7 +2260,7 @@ server.tool(
 );
 
 // Tool to list all tabs in a document
-server.tool(
+registerTool(
   "list-tabs",
   {
     docId: z.string().describe("The ID of the document"),
@@ -2280,7 +2297,7 @@ server.tool(
 );
 
 // Tool to read the content of a specific tab by tabId
-server.tool(
+registerTool(
   "get-tab",
   {
     docId: z.string().describe("The ID of the document"),
@@ -2316,7 +2333,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "get-outline",
   {
     docId: z.string().describe("Document ID. Returns headings with levels for section-aware editing."),
@@ -2337,7 +2354,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "get-doc-stats",
   {
     docId: z.string().describe("Document ID. Word count, reading time, paragraph/heading counts."),
@@ -2362,7 +2379,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "insert-text",
   {
     docId: z.string().describe("Document ID"),
@@ -2389,7 +2406,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "insert-page-break",
   {
     docId: z.string().describe("Document ID"),
@@ -2414,7 +2431,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "insert-scene-break",
   {
     docId: z.string().describe("Document ID. Page break or centered * * * line between sections."),
@@ -2435,7 +2452,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "create-list",
   {
     docId: z.string().describe("Document ID"),
@@ -2458,7 +2475,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "apply-preset",
   {
     docId: z.string().describe("Document ID"),
@@ -2481,7 +2498,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "clear-formatting",
   {
     docId: z.string().describe("Document ID. Reset bold, color, font, links on matched text."),
@@ -2509,7 +2526,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "generate-title-page",
   {
     docId: z.string().describe("Document ID. Inserts a centered academic title block at the start."),
@@ -2538,7 +2555,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "rename-doc",
   {
     docId: z.string().describe("Document ID"),
@@ -2557,7 +2574,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "copy-doc",
   {
     docId: z.string().describe("Source document ID"),
@@ -2583,7 +2600,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "export-doc",
   {
     docId: z.string().describe("Document ID"),
@@ -2621,7 +2638,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "list-comments",
   {
     docId: z.string().describe("Document ID"),
@@ -2669,7 +2686,7 @@ async function resolveQuotedTextFromDoc(
   };
 }
 
-server.tool(
+registerTool(
   "add-comment",
   {
     docId: z.string().describe("Document ID"),
@@ -2729,7 +2746,7 @@ server.tool(
   }
 );
 
-server.tool(
+registerTool(
   "insert-review-note",
   {
     docId: z.string().describe("Document ID"),
@@ -2780,7 +2797,7 @@ server.tool(
 // PROMPTS
 
 // Prompt for document creation
-server.prompt(
+registerPrompt(
   "create-doc-template",
   { 
     title: z.string().describe("The title for the new document"),
@@ -2799,7 +2816,7 @@ server.prompt(
 );
 
 // Prompt for document analysis
-server.prompt(
+registerPrompt(
   "analyze-doc",
   { 
     docId: z.string().describe("The ID of the document to analyze"),
@@ -2815,7 +2832,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+registerPrompt(
   "format-academic-essay",
   {
     docId: z.string().describe("Document ID"),
@@ -2832,7 +2849,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+registerPrompt(
   "polish-prose",
   {
     docId: z.string().describe("Document ID"),
@@ -2848,7 +2865,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+registerPrompt(
   "create-outline-from-topic",
   {
     title: z.string().describe("Document title"),
@@ -2866,7 +2883,7 @@ server.prompt(
   })
 );
 
-server.prompt(
+registerPrompt(
   "bibliography-check",
   {
     docId: z.string().describe("Document ID"),

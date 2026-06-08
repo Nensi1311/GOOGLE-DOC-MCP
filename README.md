@@ -4,7 +4,7 @@ This is a Model Context Protocol (MCP) server that allows you to connect to Goog
 
 ## Features
 
-- Read documents with **outline**, **word count**, and **reading time**
+- Read documents with **outline**, **word count** and **reading time**
 - Append, insert, find/replace, and multi-step **`edit-document`** workflows
 - **Text formatting** (color, bold, font, links) and **paragraph layout** (alignment, spacing, indents, headings)
 - **Style presets** (MLA/APA essay, manuscript, cover letter, notes)
@@ -20,7 +20,17 @@ This is a Model Context Protocol (MCP) server that allows you to connect to Goog
 
 ## Setup
 
-1. Clone this repository and navigate to the project directory:
+1. **Google Cloud OAuth** — create credentials before running the server:
+
+   - Open [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a project (or select an existing one)
+   - Enable **Google Docs API** and **Google Drive API** (APIs & Services → Library)
+   - Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   - If prompted, configure the OAuth consent screen (External is fine for personal use)
+   - Application type: **Desktop app**
+   - Download the JSON file and save it as `credentials.json` in the project root
+
+2. **Clone and build:**
 
 ```bash
 git clone https://github.com/yourusername/MCP-Google-Doc.git
@@ -31,11 +41,9 @@ npm run build
 npm start
 ```
 
-First run opens Google OAuth in the browser and saves `token.json`.
+   First run opens Google OAuth in the browser and saves `token.json`.
 
-### Claude Desktop (Windows)
-
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+3. **Connect Claude Desktop (Windows)** — add to `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ```json
 {
@@ -48,7 +56,9 @@ Add to `%APPDATA%\Claude\claude_desktop_config.json`:
 }
 ```
 
-3. Create an OAuth 2.0 client ID in the Google Cloud Console:
+   Restart Claude Desktop. Use your actual path to `build/server.js` (not the repo’s example path if yours differs).
+
+   **Cursor:** Settings → MCP → add the same `command` and `args`.
 
 ## Available Tools
 
@@ -251,7 +261,3 @@ These are **not supported** by the Google Docs/Drive APIs (or are unreliable), s
 ## Security
 
 Never commit `credentials.json`, `token.json`, or exported files with sensitive content. All are in `.gitignore`.
-
-## License
-
-MIT
