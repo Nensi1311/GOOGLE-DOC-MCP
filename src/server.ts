@@ -2820,6 +2820,348 @@ registerTool(
   }
 );
 
+// Tool to share a document
+registerTool(
+  "share-doc",
+  {
+    docId: z.string().describe("Document ID to share"),
+    email: z.string().email().describe("Email address to share with"),
+    role: z.enum(["reader", "commenter", "writer"]).describe("Role to grant"),
+  },
+  async ({ docId, email, role }) => {
+    try {
+      const { drive } = getClients();
+      const documentId = docId.toString();
+
+      await drive.permissions.create({
+        fileId: documentId,
+        sendNotificationEmail: true,
+        requestBody: {
+          role,
+          type: "user",
+          emailAddress: email,
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Successfully shared document ${documentId} with ${email} as ${role}.` }],
+      };
+    } catch (error) {
+      console.error("Error sharing document:", error);
+      return {
+        content: [{ type: "text", text: `Error sharing document: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool to insert an image from a URL
+registerTool(
+  "insert-image",
+  {
+    docId: z.string().describe("Document ID"),
+    url: z.string().url().describe("Publicly accessible URL of the image"),
+    width: z.number().optional().describe("Width in points (optional)"),
+    height: z.number().optional().describe("Height in points (optional)"),
+    beforeText: z.string().optional().describe("Insert before this text"),
+    afterHeading: z.string().optional().describe("Insert after this heading"),
+  },
+  async (params) => {
+    try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
+      const documentId = params.docId.toString();
+
+      const index = await resolveInsertIndex(documentId, params);
+
+      const size: any = {};
+      if (params.width) size.width = { magnitude: params.width, unit: "PT" };
+      if (params.height) size.height = { magnitude: params.height, unit: "PT" };
+
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              insertInlineImage: {
+                location: { index },
+                uri: params.url,
+                objectSize: (params.width || params.height) ? size : undefined,
+              },
+            },
+          ],
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Inserted image from URL at index ${index} in document ${documentId}.` }],
+      };
+    } catch (error) {
+      console.error("Error inserting image:", error);
+      return {
+        content: [{ type: "text", text: `Error inserting image: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool to insert a table
+registerTool(
+  "insert-table",
+  {
+    docId: z.string().describe("Document ID"),
+    rows: z.number().min(1).describe("Number of rows"),
+    columns: z.number().min(1).describe("Number of columns"),
+    beforeText: z.string().optional().describe("Insert before this text"),
+    afterHeading: z.string().optional().describe("Insert after this heading"),
+  },
+  async (params) => {
+    try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
+      const documentId = params.docId.toString();
+
+      const index = await resolveInsertIndex(documentId, params);
+
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              insertTable: {
+                location: { index },
+                rows: params.rows,
+                columns: params.columns,
+              },
+            },
+          ],
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Inserted ${params.rows}x${params.columns} table at index ${index} in document ${documentId}.` }],
+      };
+    } catch (error) {
+      console.error("Error inserting table:", error);
+      return {
+        content: [{ type: "text", text: `Error inserting table: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+
+
+// Tool to insert a footnote
+registerTool(
+  "insert-footnote",
+  {
+    docId: z.string().describe("Document ID"),
+    text: z.string().describe("Text of the footnote"),
+    beforeText: z.string().optional().describe("Insert before this text"),
+    afterHeading: z.string().optional().describe("Insert after this heading"),
+  },
+  async (params) => {
+    try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
+      const documentId = params.docId.toString();
+
+      const index = await resolveInsertIndex(documentId, params);
+
+      const response = await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              createFootnote: {
+                location: { index },
+              },
+            },
+          ],
+        },
+      });
+
+      const footnoteId = response.data.replies?.[0]?.createFootnote?.footnoteId;
+      if (!footnoteId) {
+        throw new Error("Failed to create footnote, no ID returned.");
+      }
+
+      // Insert text into the footnote. Footnotes start at index 1 internally.
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              insertText: {
+                location: { segmentId: footnoteId, index: 1 },
+                text: params.text,
+              },
+            },
+          ],
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Inserted footnote at index ${index} in document ${documentId}.` }],
+      };
+    } catch (error) {
+      console.error("Error inserting footnote:", error);
+      return {
+        content: [{ type: "text", text: `Error inserting footnote: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool to set document header
+registerTool(
+  "set-header",
+  {
+    docId: z.string().describe("Document ID"),
+    text: z.string().describe("Text of the header"),
+  },
+  async (params) => {
+    try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
+      const documentId = params.docId.toString();
+
+      // We must fetch the doc to see if a header already exists
+      const doc = await docs.documents.get({ documentId });
+      let headerId = "";
+
+      if (doc.data.documentStyle?.defaultHeaderId) {
+        headerId = doc.data.documentStyle.defaultHeaderId;
+        // Optional: clear existing header text by deleting its content (can be complex if there are multiple elements)
+      } else {
+        const response = await docs.documents.batchUpdate({
+          documentId,
+          requestBody: {
+            requests: [
+              {
+                createHeader: {
+                  type: "DEFAULT",
+                },
+              },
+            ],
+          },
+        });
+        headerId = response.data.replies?.[0]?.createHeader?.headerId || "";
+      }
+
+      if (!headerId) throw new Error("Failed to resolve or create header.");
+
+      // For simplicity, we just insert the text at index 1 of the header.
+      // If it already had text, this will prepend.
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              insertText: {
+                location: { segmentId: headerId, index: 1 },
+                text: params.text + "\n",
+              },
+            },
+            {
+              updateParagraphStyle: {
+                range: { segmentId: headerId, startIndex: 1, endIndex: 2 },
+                paragraphStyle: { alignment: "END" }, // Usually headers are right-aligned
+                fields: "alignment"
+              }
+            }
+          ],
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Set header in document ${documentId}.` }],
+      };
+    } catch (error) {
+      console.error("Error setting header:", error);
+      return {
+        content: [{ type: "text", text: `Error setting header: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// Tool to set document footer
+registerTool(
+  "set-footer",
+  {
+    docId: z.string().describe("Document ID"),
+    text: z.string().describe("Text of the footer"),
+  },
+  async (params) => {
+    try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
+      const documentId = params.docId.toString();
+
+      const doc = await docs.documents.get({ documentId });
+      let footerId = "";
+
+      if (doc.data.documentStyle?.defaultFooterId) {
+        footerId = doc.data.documentStyle.defaultFooterId;
+      } else {
+        const response = await docs.documents.batchUpdate({
+          documentId,
+          requestBody: {
+            requests: [
+              {
+                createFooter: {
+                  type: "DEFAULT",
+                },
+              },
+            ],
+          },
+        });
+        footerId = response.data.replies?.[0]?.createFooter?.footerId || "";
+      }
+
+      if (!footerId) throw new Error("Failed to resolve or create footer.");
+
+      await docs.documents.batchUpdate({
+        documentId,
+        requestBody: {
+          requests: [
+            {
+              insertText: {
+                location: { segmentId: footerId, index: 1 },
+                text: params.text + "\n",
+              },
+            },
+            {
+              updateParagraphStyle: {
+                range: { segmentId: footerId, startIndex: 1, endIndex: 2 },
+                paragraphStyle: { alignment: "CENTER" }, // Usually footers are centered
+                fields: "alignment"
+              }
+            }
+          ],
+        },
+      });
+
+      return {
+        content: [{ type: "text", text: `Set footer in document ${documentId}.` }],
+      };
+    } catch (error) {
+      console.error("Error setting footer:", error);
+      return {
+        content: [{ type: "text", text: `Error setting footer: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
 // PROMPTS
 
 // Prompt for document creation
@@ -2920,6 +3262,41 @@ registerPrompt(
       content: {
         type: "text",
         text: `Review doc ${docId} for citation issues. Use get-doc and get-outline. Flag missing References section, in-text citations without matching entries, and inconsistent citation format. Add comments via add-comment for each issue; do not invent sources.`,
+      },
+    }],
+  })
+);
+
+registerPrompt(
+  "format-professional-report",
+  {
+    docId: z.string().describe("Document ID"),
+    headerText: z.string().describe("Text for the document header"),
+    footerText: z.string().describe("Text for the document footer"),
+  },
+  ({ docId, headerText, footerText }) => ({
+    messages: [{
+      role: "user",
+      content: {
+        type: "text",
+        text: `Format doc ${docId} as a professional report. Start by using set-header with "${headerText}" and set-footer with "${footerText}". Then use get-doc to review the structure. If it lacks data presentation, suggest using insert-table, and if visual aids are needed, use insert-image.`,
+      },
+    }],
+  })
+);
+
+registerPrompt(
+  "collaborative-review-setup",
+  {
+    docId: z.string().describe("Document ID"),
+    reviewerEmail: z.string().describe("Email of the reviewer to share with"),
+  },
+  ({ docId, reviewerEmail }) => ({
+    messages: [{
+      role: "user",
+      content: {
+        type: "text",
+        text: `Prepare doc ${docId} for review. First, use share-doc to grant "${reviewerEmail}" commenter access. Then use get-doc to read the content. For any claims that need academic citations, use insert-footnote to add placeholder citations.`,
       },
     }],
   })
