@@ -21,15 +21,15 @@ Single-file MCP server (`src/server.ts`) — Google Docs/Drive over stdio. OAuth
 
 **Read:** `get-doc`, `get-outline`, `get-doc-stats`, `list-docs`, `search-docs`, `list-tabs`, `get-tab`
 
-**Write:** `create-doc`, `update-doc`, `insert-text`, `edit-document`, `rename-doc`, `copy-doc`, `delete-doc`
+**Write:** `create-doc`, `update-doc`, `insert-text`, `edit-document`, `rename-doc`, `copy-doc`, `delete-doc`, `insert-image`, `insert-table`, `insert-footnote`
 
-**Format:** `format-text`, `format-paragraph`, `clear-formatting`, `apply-preset`, `generate-title-page`
+**Format:** `format-text`, `format-paragraph`, `clear-formatting`, `apply-preset`, `generate-title-page`, `set-header`, `set-footer`
 
 **Structure:** `create-list`, `insert-page-break`, `insert-scene-break`
 
-**Collaboration:** `list-comments`, `add-comment`, `insert-review-note`, `export-doc`
+**Collaboration:** `list-comments`, `add-comment`, `insert-review-note`, `export-doc`, `share-doc`
 
-**Prompts:** `create-doc-template`, `analyze-doc`, `format-academic-essay`, `polish-prose`, `create-outline-from-topic`, `bibliography-check`
+**Prompts:** `create-doc-template`, `analyze-doc`, `format-academic-essay`, `polish-prose`, `create-outline-from-topic`, `bibliography-check`, `format-professional-report`, `collaborative-review-setup`
 
 ### Key design choices
 

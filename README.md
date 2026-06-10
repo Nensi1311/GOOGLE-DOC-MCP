@@ -82,6 +82,9 @@ npm start
 | **`edit-document`** | **All-in-one** — chain multiple operations in one call |
 | `rename-doc` / `copy-doc` | Rename or duplicate |
 | `delete-doc` | Delete document |
+| `insert-image` | Insert image from URL into document body |
+| `insert-table` | Insert an N x M table |
+| `insert-footnote` | Insert a footnote at a specific location |
 
 ### Format (character)
 
@@ -97,6 +100,7 @@ npm start
 | `format-paragraph` | Alignment, line spacing, indents, heading styles |
 | `apply-preset` | `essay-mla`, `essay-apa`, `manuscript`, `cover-letter`, `notes` |
 | `generate-title-page` | Centered academic title block at document start |
+| `set-header` / `set-footer`| Add or edit document header and footer text |
 
 ### Structure
 
@@ -113,6 +117,7 @@ npm start
 | `list-comments` / `add-comment` | Drive comment panel (see note below) |
 | `insert-review-note` | **Visible** yellow in-doc note (use when comments must show in body) |
 | `export-doc` | Export to PDF, DOCX, TXT, or HTML (saved to `exports/`) |
+| `share-doc` | Share document with an email address (viewer/commenter/editor) |
 
 ## `edit-document` operations
 
@@ -218,6 +223,8 @@ Copy these prompts into Claude:
 | `polish-prose` | Read, suggest, apply safe edits |
 | `create-outline-from-topic` | New doc with section outline |
 | `bibliography-check` | Flag citation / References issues |
+| `format-professional-report` | Apply headers/footers and suggest tables/images |
+| `collaborative-review-setup` | Share doc and add academic footnote placeholders |
 
 ## Comments: where they appear
 
