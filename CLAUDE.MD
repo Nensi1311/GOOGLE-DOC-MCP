@@ -29,8 +29,6 @@ Single-file MCP server (`src/server.ts`) — Google Docs/Drive over stdio. OAuth
 
 **Collaboration:** `list-comments`, `add-comment`, `insert-review-note`, `export-doc`
 
-**Resources:** `googledocs://list`, `googledocs://{docId}`
-
 **Prompts:** `create-doc-template`, `analyze-doc`, `format-academic-essay`, `polish-prose`, `create-outline-from-topic`, `bibliography-check`
 
 ### Key design choices

@@ -1,4 +1,4 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { google } from "googleapis";
 import { authenticate } from "@google-cloud/local-auth";
@@ -14,7 +14,6 @@ import { OAuth2Client } from "google-auth-library";
 const SCOPES = [
   "https://www.googleapis.com/auth/documents",
   "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/drive.readonly" // Add read-only scope as a fallback
 ];
 
 // Resolve paths relative to the project root
@@ -49,6 +48,43 @@ function registerPrompt(
   server.prompt(name, args as never, handler as never);
 }
 
+/** Escape single quotes for Google Drive query strings (fullText contains '...'). */
+function escapeDriveQueryValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function persistTokensOnRefresh(client: OAuth2Client): void {
+  client.on("tokens", (tokens) => {
+    if (!fs.existsSync(TOKEN_PATH)) return;
+    fs.promises.readFile(TOKEN_PATH, "utf-8")
+      .then((raw) => {
+        const current = JSON.parse(raw);
+        return fs.promises.writeFile(TOKEN_PATH, JSON.stringify({ ...current, ...tokens }));
+      })
+      .then(() => console.error("OAuth token refreshed and saved to:", TOKEN_PATH))
+      .catch((err) => console.error("Failed to persist refreshed token:", err));
+  });
+}
+
+async function authenticateFresh(): Promise<OAuth2Client> {
+  console.error("Starting OAuth flow...");
+  const client = await authenticate({
+    scopes: SCOPES,
+    keyfilePath: CREDENTIALS_PATH,
+  });
+  persistTokensOnRefresh(client);
+
+  if (client.credentials) {
+    console.error("Authentication successful, saving token...");
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(client.credentials));
+    console.error("Token saved successfully to:", TOKEN_PATH);
+  } else {
+    console.error("Authentication succeeded but no credentials returned");
+  }
+
+  return client;
+}
+
 /**
  * Load saved credentials if they exist, otherwise trigger the OAuth flow
  */
@@ -61,48 +97,61 @@ async function authorize() {
     const clientId = keys.installed.client_id;
     const clientSecret = keys.installed.client_secret;
     const redirectUri = keys.installed.redirect_uris[0];
-    
+
     console.error("Using client ID:", clientId);
     console.error("Using redirect URI:", redirectUri);
-    
-    // Create an OAuth2 client
-    const oAuth2Client = new OAuth2Client(clientId, clientSecret, redirectUri);
-    
-    // Check if we have previously stored a token
+
     if (fs.existsSync(TOKEN_PATH)) {
       console.error("Found existing token, attempting to use it...");
+      const oAuth2Client = new OAuth2Client(clientId, clientSecret, redirectUri);
       const token = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf-8"));
       oAuth2Client.setCredentials(token);
-      return oAuth2Client;
-    }
-    
-    // No token found, use the local-auth library to get one
-    console.error("No token found, starting OAuth flow...");
-    const client = await authenticate({
-      scopes: SCOPES,
-      keyfilePath: CREDENTIALS_PATH,
-    });
-    
-    if (client.credentials) {
-      console.error("Authentication successful, saving token...");
-      fs.writeFileSync(TOKEN_PATH, JSON.stringify(client.credentials));
-      console.error("Token saved successfully to:", TOKEN_PATH);
+      persistTokensOnRefresh(oAuth2Client);
+      try {
+        await oAuth2Client.getAccessToken();
+        return oAuth2Client;
+      } catch (tokenErr: any) {
+        // Only delete the stored token for real auth failures, not transient network errors
+        const code: string = tokenErr?.response?.data?.error ?? tokenErr?.code ?? "";
+        const isAuthError = ["invalid_grant", "invalid_token", "TOKEN_EXPIRED"].includes(code);
+        if (isAuthError) {
+          console.error("Saved token is invalid/expired, deleting and re-authenticating...");
+          fs.unlinkSync(TOKEN_PATH);
+        } else {
+          console.error("Transient error refreshing token (keeping stored token):", tokenErr?.message ?? tokenErr);
+          throw tokenErr;
+        }
+      }
     } else {
-      console.error("Authentication succeeded but no credentials returned");
+      console.error("No token found.");
     }
-    
-    return client;
+
+    return authenticateFresh();
   } catch (err) {
+    const e = err as Error;
     console.error("Error authorizing with Google:", err);
-    if (err.message) console.error("Error message:", err.message);
-    if (err.stack) console.error("Stack trace:", err.stack);
+    if (e.message) console.error("Error message:", e.message);
+    if (e.stack) console.error("Stack trace:", e.stack);
     throw err;
   }
 }
 
 // Create Docs and Drive API clients
-let docsClient: docs_v1.Docs;
-let driveClient: drive_v3.Drive;
+let docsClient: docs_v1.Docs | undefined;
+let driveClient: drive_v3.Drive | undefined;
+
+/**
+ * Returns initialized API clients, or throws if OAuth has not completed.
+ * Call this at the top of every tool handler.
+ */
+function getClients(): { docs: docs_v1.Docs; drive: drive_v3.Drive } {
+  if (!docsClient || !driveClient) {
+    throw new Error(
+      "Google API clients not initialized. Check credentials and re-authenticate."
+    );
+  }
+  return { docs: docsClient, drive: driveClient };
+}
 
 // Initialize Google API clients
 async function initClients() {
@@ -121,14 +170,6 @@ async function initClients() {
   }
 }
 
-// Initialize clients when the server starts
-initClients().then((success) => {
-  if (!success) {
-    console.error("Failed to initialize Google API clients. Server will not work correctly.");
-  } else {
-    console.error("Google API clients initialized successfully.");
-  }
-});
 
 /** Exclusive end index of the document body (from API structure, not text length). */
 function getBodyEndIndex(doc: docs_v1.Schema$Document): number {
@@ -148,14 +189,14 @@ async function appendToDocument(
   let textToInsert = text;
 
   if (leadingNewline) {
-    const doc = await docsClient.documents.get({ documentId });
+    const doc = await getClients().docs.documents.get({ documentId });
     const endIndex = getBodyEndIndex(doc.data);
     if (endIndex > 1 && !text.startsWith("\n")) {
       textToInsert = "\n" + text;
     }
   }
 
-  await docsClient.documents.batchUpdate({
+  await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: {
       requests: [
@@ -224,7 +265,7 @@ function findTextRanges(
   return ranges;
 }
 
-/** Parse #RGB, #RRGGBB, or named colors to Google Docs rgbColor (0.0–1.0). */
+/** Parse #RGB, #RRGGBB, or named colors to Google Docs rgbColor (0.0—1.0). */
 function parseColor(color: string): { red: number; green: number; blue: number } {
   const named: Record<string, [number, number, number]> = {
     black: [0, 0, 0],
@@ -337,7 +378,7 @@ async function resolveTextRanges(
   const { findText, startIndex, endIndex, occurrenceIndex, matchCase = true, confirmBulkEdit } = options;
 
   if (findText) {
-    const doc = await docsClient.documents.get({ documentId });
+    const doc = await getClients().docs.documents.get({ documentId });
     let ranges = findTextRanges(doc.data, findText, matchCase);
     if (ranges.length === 0) {
       throw new Error(`Text "${findText}" not found in document.`);
@@ -464,9 +505,10 @@ async function resolveParagraphRanges(
     endIndex?: number;
     occurrenceIndex?: number;
     matchCase?: boolean;
+    confirmBulkEdit?: boolean;
   }
 ): Promise<IndexRange[]> {
-  const { findText, startIndex, endIndex, occurrenceIndex, matchCase = true } = options;
+  const { findText, startIndex, endIndex, occurrenceIndex, matchCase = true, confirmBulkEdit } = options;
 
   if (startIndex !== undefined && endIndex !== undefined) {
     if (startIndex >= endIndex) {
@@ -475,7 +517,7 @@ async function resolveParagraphRanges(
     return [{ startIndex, endIndex }];
   }
 
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   let ranges = findParagraphRanges(doc.data, { findText, matchCase });
 
   if (findText && ranges.length === 0) {
@@ -492,6 +534,9 @@ async function resolveParagraphRanges(
       );
     }
     ranges = [ranges[occurrenceIndex]];
+  } else if (findText) {
+    // Same bulk-edit guard as resolveTextRanges
+    warnIfManyMatches(ranges.length, findText, confirmBulkEdit);
   }
 
   return ranges;
@@ -652,7 +697,7 @@ async function buildParagraphStyleRequestsForDoc(
   ranges: IndexRange[],
   format: ParagraphFormatOptions
 ): Promise<{ requests: docs_v1.Schema$Request[]; textRunCount: number }> {
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   const textRunRanges = expandParagraphRangesToTextRunRanges(doc.data, ranges);
   return {
     requests: buildParagraphStyleRequests(ranges, format, textRunRanges),
@@ -666,7 +711,7 @@ async function applyReplaceText(
   content: string,
   matchCase: boolean
 ): Promise<number> {
-  const response = await docsClient.documents.batchUpdate({
+  const response = await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: {
       requests: [
@@ -684,109 +729,110 @@ async function applyReplaceText(
 
 type DocumentEditOperation =
   | {
-      type: "append";
-      content: string;
-      leadingNewline?: boolean;
-    }
+    type: "append";
+    content: string;
+    leadingNewline?: boolean;
+  }
   | {
-      type: "replaceText";
-      findText: string;
-      content: string;
-      matchCase?: boolean;
-    }
+    type: "replaceText";
+    findText: string;
+    content: string;
+    matchCase?: boolean;
+  }
   | {
-      type: "formatText";
-      findText?: string;
-      startIndex?: number;
-      endIndex?: number;
-      occurrenceIndex?: number;
-      matchCase?: boolean;
-      bold?: boolean;
-      italic?: boolean;
-      underline?: boolean;
-      strikethrough?: boolean;
-      foregroundColor?: string;
-      backgroundColor?: string;
-      fontSize?: number;
-      fontFamily?: string;
-      linkUrl?: string;
-      baselineOffset?: "SUPERSCRIPT" | "SUBSCRIPT" | "NONE";
-    }
+    type: "formatText";
+    findText?: string;
+    startIndex?: number;
+    endIndex?: number;
+    occurrenceIndex?: number;
+    matchCase?: boolean;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    strikethrough?: boolean;
+    foregroundColor?: string;
+    backgroundColor?: string;
+    fontSize?: number;
+    fontFamily?: string;
+    linkUrl?: string;
+    baselineOffset?: "SUPERSCRIPT" | "SUBSCRIPT" | "NONE";
+    confirmBulkEdit?: boolean;
+  }
   | {
-      type: "formatParagraph";
-      findText?: string;
-      startIndex?: number;
-      endIndex?: number;
-      occurrenceIndex?: number;
-      matchCase?: boolean;
-      alignment?: string;
-      lineSpacing?: number;
-      namedStyle?: string;
-      spaceAbove?: number;
-      spaceBelow?: number;
-      indentStart?: number;
-      indentEnd?: number;
-      indentFirstLine?: number;
-      fontFamily?: string;
-      fontSize?: number;
-      foregroundColor?: string;
-      bold?: boolean;
-      italic?: boolean;
-    }
+    type: "formatParagraph";
+    findText?: string;
+    startIndex?: number;
+    endIndex?: number;
+    occurrenceIndex?: number;
+    matchCase?: boolean;
+    alignment?: string;
+    lineSpacing?: number;
+    namedStyle?: string;
+    spaceAbove?: number;
+    spaceBelow?: number;
+    indentStart?: number;
+    indentEnd?: number;
+    indentFirstLine?: number;
+    fontFamily?: string;
+    fontSize?: number;
+    foregroundColor?: string;
+    bold?: boolean;
+    italic?: boolean;
+  }
   | {
-      type: "insertText";
-      content: string;
-      index?: number;
-      afterHeading?: string;
-      beforeText?: string;
-      afterText?: string;
-      matchCase?: boolean;
-      occurrenceIndex?: number;
-    }
+    type: "insertText";
+    content: string;
+    index?: number;
+    afterHeading?: string;
+    beforeText?: string;
+    afterText?: string;
+    matchCase?: boolean;
+    occurrenceIndex?: number;
+  }
   | {
-      type: "insertPageBreak";
-      index?: number;
-      afterHeading?: string;
-      beforeText?: string;
-      afterText?: string;
-      matchCase?: boolean;
-      occurrenceIndex?: number;
-    }
+    type: "insertPageBreak";
+    index?: number;
+    afterHeading?: string;
+    beforeText?: string;
+    afterText?: string;
+    matchCase?: boolean;
+    occurrenceIndex?: number;
+  }
   | {
-      type: "createList";
-      items: string[];
-      listType?: "bullet" | "numbered";
-      afterHeading?: string;
-      afterText?: string;
-      beforeText?: string;
-      append?: boolean;
-      matchCase?: boolean;
-      occurrenceIndex?: number;
-    }
+    type: "createList";
+    items: string[];
+    listType?: "bullet" | "numbered";
+    afterHeading?: string;
+    afterText?: string;
+    beforeText?: string;
+    append?: boolean;
+    matchCase?: boolean;
+    occurrenceIndex?: number;
+  }
   | {
-      type: "applyPreset";
-      preset: StylePreset;
-      findText?: string;
-      matchCase?: boolean;
-    }
+    type: "applyPreset";
+    preset: StylePreset;
+    findText?: string;
+    matchCase?: boolean;
+  }
   | {
-      type: "clearFormatting";
-      findText?: string;
-      startIndex?: number;
-      endIndex?: number;
-      occurrenceIndex?: number;
-      matchCase?: boolean;
-      confirmBulkEdit?: boolean;
-    }
+    type: "clearFormatting";
+    findText?: string;
+    startIndex?: number;
+    endIndex?: number;
+    occurrenceIndex?: number;
+    matchCase?: boolean;
+    confirmBulkEdit?: boolean;
+  }
   | {
-      type: "insertSceneBreak";
-      afterHeading?: string;
-      afterText?: string;
-      beforeText?: string;
-      usePageBreak?: boolean;
-      matchCase?: boolean;
-      occurrenceIndex?: number;
-    };
+    type: "insertSceneBreak";
+    afterHeading?: string;
+    afterText?: string;
+    beforeText?: string;
+    usePageBreak?: boolean;
+    matchCase?: boolean;
+    occurrenceIndex?: number;
+  };
 
 async function applyDocumentEdit(
   documentId: string,
@@ -823,7 +869,7 @@ async function applyDocumentEdit(
         baselineOffset: operation.baselineOffset,
       };
       const requests = buildTextStyleRequests(ranges, format);
-      await docsClient.documents.batchUpdate({
+      await getClients().docs.documents.batchUpdate({
         documentId,
         requestBody: { requests },
       });
@@ -851,7 +897,7 @@ async function applyDocumentEdit(
         ranges,
         format
       );
-      await docsClient.documents.batchUpdate({
+      await getClients().docs.documents.batchUpdate({
         documentId,
         requestBody: { requests },
       });
@@ -859,7 +905,9 @@ async function applyDocumentEdit(
     }
     case "insertText": {
       const index = await resolveInsertIndex(documentId, operation);
-      const prefix = operation.beforeText || operation.afterHeading ? "\n" : "";
+      // Append a trailing newline when inserting before existing text so the
+      // new content ends up on its own line rather than merged with the target.
+      const prefix = operation.beforeText ? "\n" : "";
       await insertTextAtIndex(documentId, index, prefix + operation.content);
       return `Inserted text at index ${index}`;
     }
@@ -880,7 +928,7 @@ async function applyDocumentEdit(
     case "clearFormatting": {
       const ranges = await resolveTextRanges(documentId, operation);
       const requests = buildClearFormattingRequests(ranges);
-      await docsClient.documents.batchUpdate({
+      await getClients().docs.documents.batchUpdate({
         documentId,
         requestBody: { requests },
       });
@@ -937,7 +985,7 @@ function warnIfManyMatches(
   if (count > BULK_MATCH_WARNING_THRESHOLD && !confirmBulkEdit) {
     throw new Error(
       `Found ${count} matches for "${findText}" (threshold ${BULK_MATCH_WARNING_THRESHOLD}). ` +
-        `Use occurrenceIndex for one match, or set confirmBulkEdit: true to apply to all.`
+      `Use occurrenceIndex for one match, or set confirmBulkEdit: true to apply to all.`
     );
   }
 }
@@ -1064,7 +1112,7 @@ async function insertTextAtIndex(
   index: number,
   text: string
 ): Promise<void> {
-  await docsClient.documents.batchUpdate({
+  await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: {
       requests: [{ insertText: { location: { index }, text } }],
@@ -1076,7 +1124,7 @@ async function insertPageBreakAtIndex(
   documentId: string,
   index: number
 ): Promise<void> {
-  await docsClient.documents.batchUpdate({
+  await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: {
       requests: [{ insertPageBreak: { location: { index } } }],
@@ -1097,7 +1145,7 @@ async function resolveInsertIndex(
 ): Promise<number> {
   if (options.index !== undefined) return options.index;
 
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   const data = doc.data;
 
   if (options.afterHeading) {
@@ -1211,7 +1259,7 @@ async function applyStylePresetToDocument(
   preset: StylePreset,
   scope?: { findText?: string; matchCase?: boolean }
 ): Promise<string> {
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   let ranges = getAllBodyParagraphRanges(doc.data);
 
   if (scope?.findText) {
@@ -1236,7 +1284,7 @@ async function applyStylePresetToDocument(
     ...buildParagraphStyleRequests(ranges, paragraphFormat, textRunRanges)
   );
 
-  await docsClient.documents.batchUpdate({
+  await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: { requests },
   });
@@ -1263,7 +1311,7 @@ async function createListInDocument(
   let insertIndex: number;
 
   if (options.append) {
-    const doc = await docsClient.documents.get({ documentId });
+    const doc = await getClients().docs.documents.get({ documentId });
     insertIndex = getBodyEndIndex(doc.data) - 1;
     const prefix = insertIndex > 1 ? "\n" : "";
     await insertTextAtIndex(documentId, insertIndex, prefix + listText);
@@ -1287,7 +1335,7 @@ async function createListInDocument(
       ? "NUMBERED_DECIMAL_NESTED"
       : "BULLET_DISC_CIRCLE_SQUARE";
 
-  await docsClient.documents.batchUpdate({
+  await getClients().docs.documents.batchUpdate({
     documentId,
     requestBody: {
       requests: [
@@ -1328,10 +1376,10 @@ async function generateTitlePageContent(
   const block = lines.join("");
   await insertTextAtIndex(documentId, 1, block);
 
-  let doc = await docsClient.documents.get({ documentId });
+  let doc = await getClients().docs.documents.get({ documentId });
   const titlePara = findParagraphContaining(doc.data, fields.title, { matchCase: true });
   if (titlePara) {
-    await docsClient.documents.batchUpdate({
+    await getClients().docs.documents.batchUpdate({
       documentId,
       requestBody: {
         requests: [
@@ -1349,18 +1397,22 @@ async function generateTitlePageContent(
     });
   }
 
-  doc = await docsClient.documents.get({ documentId });
+  doc = await getClients().docs.documents.get({ documentId });
   const centerLines = [fields.author, fields.course, fields.instructor, fields.date].filter(Boolean) as string[];
+  const centerRequests: docs_v1.Schema$Request[] = [];
   for (const line of centerLines) {
     const para = findParagraphContaining(doc.data, line, { matchCase: true });
     if (para) {
-      await docsClient.documents.batchUpdate({
-        documentId,
-        requestBody: {
-          requests: buildParagraphStyleRequests([para], { alignment: "center", fontFamily: "Times New Roman", fontSize: 12 }),
-        },
-      });
+      centerRequests.push(
+        ...buildParagraphStyleRequests([para], { alignment: "center", fontFamily: "Times New Roman", fontSize: 12 })
+      );
     }
+  }
+  if (centerRequests.length > 0) {
+    await getClients().docs.documents.batchUpdate({
+      documentId,
+      requestBody: { requests: centerRequests },
+    });
   }
 
   return "Title page inserted at document start";
@@ -1384,10 +1436,10 @@ async function insertSceneBreak(
   }
   const line = "\n* * *\n";
   await insertTextAtIndex(documentId, index, line);
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   const para = findParagraphContaining(doc.data, "* * *", { matchCase: true });
   if (para) {
-    await docsClient.documents.batchUpdate({
+    await getClients().docs.documents.batchUpdate({
       documentId,
       requestBody: {
         requests: buildParagraphStyleRequests([para], { alignment: "center", spaceAbove: 12, spaceBelow: 12 }),
@@ -1423,105 +1475,6 @@ function flattenTabs(tabs: any[]): { tabId: string; title: string; index: number
   return result;
 }
 
-// RESOURCES
-
-// Resource for listing documents
-server.resource(
-  "list-docs",
-  "googledocs://list",
-  async (uri) => {
-    try {
-      const response = await driveClient.files.list({
-        q: "mimeType='application/vnd.google-apps.document'",
-        fields: "files(id, name, createdTime, modifiedTime)",
-        pageSize: 50,
-        supportsAllDrives: true,
-        includeItemsFromAllDrives: true,
-        corpora: 'allDrives',
-      });
-
-      const files = response.data.files || [];
-      let content = "Google Docs in your Drive:\n\n";
-      
-      if (files.length === 0) {
-        content += "No Google Docs found.";
-      } else {
-        files.forEach((file: any) => {
-          content += `Title: ${file.name}\n`;
-          content += `ID: ${file.id}\n`;
-          content += `Created: ${file.createdTime}\n`;
-          content += `Last Modified: ${file.modifiedTime}\n\n`;
-        });
-      }
-
-      return {
-        contents: [{
-          uri: uri.href,
-          text: content,
-        }]
-      };
-    } catch (error) {
-      console.error("Error listing documents:", error);
-      return {
-        contents: [{
-          uri: uri.href,
-          text: `Error listing documents: ${error}`,
-        }]
-      };
-    }
-  }
-);
-
-// Resource to get a specific document by ID
-server.resource(
-  "get-doc",
-  new ResourceTemplate("googledocs://{docId}", { list: undefined }),
-  async (uri, { docId }) => {
-    try {
-      const doc = await docsClient.documents.get({
-        documentId: docId as string,
-      });
-      
-      // Extract the document content
-      let content = `Document: ${doc.data.title}\n\n`;
-      
-      // Process the document content from the complex data structure
-      const document = doc.data;
-      if (document && document.body && document.body.content) {
-        let textContent = "";
-        
-        // Loop through the document's structural elements
-        document.body.content.forEach((element: any) => {
-          if (element.paragraph) {
-            element.paragraph.elements.forEach((paragraphElement: any) => {
-              if (paragraphElement.textRun && paragraphElement.textRun.content) {
-                textContent += paragraphElement.textRun.content;
-              }
-            });
-          }
-        });
-        
-        content += textContent;
-      }
-
-      return {
-        contents: [{
-          uri: uri.href,
-          text: content,
-        }]
-      };
-    } catch (error) {
-      console.error(`Error getting document ${docId}:`, error);
-      return {
-        contents: [{
-          uri: uri.href,
-          text: `Error getting document ${docId}: ${error}`,
-        }]
-      };
-    }
-  }
-);
-
 // TOOLS
 
 // Tool to create a new document
@@ -1533,8 +1486,9 @@ registerTool(
   },
   async ({ title, content = "" }) => {
     try {
+      const { docs } = getClients();
       // Create a new document
-      const doc = await docsClient.documents.create({
+      const doc = await docs.documents.create({
         requestBody: {
           title: title,
         },
@@ -1544,7 +1498,7 @@ registerTool(
 
       // If content was provided, add it to the document
       if (content) {
-        await docsClient.documents.batchUpdate({
+        await docs.documents.batchUpdate({
           documentId,
           requestBody: {
             requests: [
@@ -1592,21 +1546,21 @@ registerTool(
     content: z.string().optional().describe("Text to append, new full document (when replaceEntireDocument is true), or replacement text (when findText is set)"),
     findText: z.string().optional().describe("Find/replace specific text. For middle-of-doc inserts use insert-text instead."),
     replaceEntireDocument: z.boolean().optional().describe("If true, delete entire document and insert content. If false, append content. Ignored when findText is set. Default: false"),
-    replaceAll: z.boolean().optional().describe("Deprecated alias for replaceEntireDocument"),
     matchCase: z.boolean().optional().describe("Case-sensitive search when using findText. Default: true"),
     leadingNewline: z.boolean().optional().describe("When appending, prepend a newline before content if the doc is non-empty. Default: true"),
     confirmBulkEdit: z.boolean().optional().describe("Required when findText matches more than 10 places. Default: false"),
   },
-  async ({ docId, content, findText, replaceEntireDocument, replaceAll, matchCase = true, leadingNewline = true, confirmBulkEdit }) => {
+  async ({ docId, content, findText, replaceEntireDocument, matchCase = true, leadingNewline = true, confirmBulkEdit }) => {
 
     try {
+      const { docs } = getClients();
       // Ensure docId is a string and not null/undefined
       if (!docId) {
         throw new Error("Document ID is required");
       }
 
-      const wipeAndReplace = replaceEntireDocument ?? replaceAll ?? false;
-      
+      const wipeAndReplace = replaceEntireDocument ?? false;
+
       const documentId = docId.toString();
 
       if (findText) {
@@ -1614,11 +1568,11 @@ registerTool(
           throw new Error("content is required when findText is set (used as the replacement text)");
         }
 
-        const doc = await docsClient.documents.get({ documentId });
+        const doc = await docs.documents.get({ documentId });
         const matchCount = findTextRanges(doc.data, findText, matchCase).length;
         warnIfManyMatches(matchCount, findText, confirmBulkEdit);
 
-        const response = await docsClient.documents.batchUpdate({
+        const response = await docs.documents.batchUpdate({
           documentId,
           requestBody: {
             requests: [
@@ -1651,9 +1605,9 @@ registerTool(
       if (content === undefined) {
         throw new Error("content is required when findText is not set");
       }
-      
+
       if (wipeAndReplace) {
-        const doc = await docsClient.documents.get({ documentId });
+        const doc = await docs.documents.get({ documentId });
         const endIndex = getBodyEndIndex(doc.data);
 
         const requests: docs_v1.Schema$Request[] = [];
@@ -1674,14 +1628,14 @@ registerTool(
           },
         });
 
-        await docsClient.documents.batchUpdate({
+        await docs.documents.batchUpdate({
           documentId,
           requestBody: { requests },
         });
       } else {
         await appendToDocument(documentId, content, { leadingNewline });
       }
-      
+
       return {
         content: [
           {
@@ -1745,6 +1699,7 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
       if (!params.docId) throw new Error("Document ID is required");
 
       const documentId = params.docId.toString();
@@ -1756,8 +1711,30 @@ registerTool(
         occurrenceIndex,
         matchCase = true,
         confirmBulkEdit,
-        ...format
+        bold,
+        italic,
+        underline,
+        strikethrough,
+        foregroundColor,
+        backgroundColor,
+        fontSize,
+        fontFamily,
+        linkUrl,
+        baselineOffset,
       } = params;
+
+      const format: TextFormatOptions = {
+        bold,
+        italic,
+        underline,
+        strikethrough,
+        foregroundColor,
+        backgroundColor,
+        fontSize,
+        fontFamily,
+        linkUrl,
+        baselineOffset,
+      };
 
       const ranges = await resolveTextRanges(documentId, {
         findText,
@@ -1770,7 +1747,7 @@ registerTool(
 
       const requests = buildTextStyleRequests(ranges, format);
 
-      await docsClient.documents.batchUpdate({
+      await docs.documents.batchUpdate({
         documentId,
         requestBody: { requests },
       });
@@ -1837,9 +1814,11 @@ registerTool(
     foregroundColor: z.string().optional().describe("Text color for paragraph (hex or name)"),
     bold: z.boolean().optional().describe("Bold all text in the paragraph"),
     italic: z.boolean().optional().describe("Italic all text in the paragraph"),
+    confirmBulkEdit: z.boolean().optional().describe("Set true when findText matches more than 10 paragraphs"),
   },
   async (params) => {
     try {
+      const { docs } = getClients();
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
 
@@ -1849,6 +1828,7 @@ registerTool(
         endIndex: params.endIndex,
         occurrenceIndex: params.occurrenceIndex,
         matchCase: params.matchCase,
+        confirmBulkEdit: params.confirmBulkEdit,
       });
 
       const format: ParagraphFormatOptions = {
@@ -1872,7 +1852,7 @@ registerTool(
         format
       );
 
-      await docsClient.documents.batchUpdate({
+      await docs.documents.batchUpdate({
         documentId,
         requestBody: { requests },
       });
@@ -1924,6 +1904,7 @@ const documentEditOperationSchema = z.discriminatedUnion("type", [
     fontFamily: z.string().optional(),
     linkUrl: z.string().optional(),
     baselineOffset: z.enum(["SUPERSCRIPT", "SUBSCRIPT", "NONE"]).optional(),
+    confirmBulkEdit: z.boolean().optional(),
   }),
   z.object({
     type: z.literal("formatParagraph"),
@@ -1945,6 +1926,7 @@ const documentEditOperationSchema = z.discriminatedUnion("type", [
     foregroundColor: z.string().optional(),
     bold: z.boolean().optional(),
     italic: z.boolean().optional(),
+    confirmBulkEdit: z.boolean().optional(),
   }),
   z.object({
     type: z.literal("insertText"),
@@ -2016,6 +1998,7 @@ registerTool(
   },
   async ({ docId, operations }) => {
     try {
+      const { docs } = getClients();
       if (!docId) throw new Error("Document ID is required");
       const documentId = docId.toString();
       const results: string[] = [];
@@ -2052,28 +2035,27 @@ registerTool(
   },
   async ({ query }) => {
     try {
-      const response = await driveClient.files.list({
-        q: `mimeType='application/vnd.google-apps.document' and fullText contains '${query}'`,
+      const { drive } = getClients();
+      const safeQuery = escapeDriveQueryValue(query);
+      const response = await drive.files.list({
+        q: `mimeType='application/vnd.google-apps.document' and fullText contains '${safeQuery}'`,
         fields: "files(id, name, createdTime, modifiedTime)",
         pageSize: 10,
         supportsAllDrives: true,
         includeItemsFromAllDrives: true,
         corpora: 'allDrives',
       });
-      
-      // Add response logging for debugging
-      console.error("Drive API Response:", JSON.stringify(response, null, 2));
-      
+
       // Add better response validation
       if (!response || !response.data) {
         throw new Error("Invalid response from Google Drive API");
       }
-      
+
       // Add null check and default to empty array
       const files = (response.data.files || []);
-      
+
       let content = `Search results for "${query}":\n\n`;
-      
+
       if (files.length === 0) {
         content += "No documents found matching your query.";
       } else {
@@ -2083,8 +2065,11 @@ registerTool(
           content += `Created: ${file.createdTime}\n`;
           content += `Last Modified: ${file.modifiedTime}\n\n`;
         });
+        if (files.length >= 10) {
+          content += "\nNote: Results are limited to 10. Refine your query to find specific documents.";
+        }
       }
-      
+
       return {
         content: [
           {
@@ -2096,10 +2081,10 @@ registerTool(
     } catch (error) {
       console.error("Error searching documents:", error);
       // Include more detailed error information
-      const errorMessage = error instanceof Error 
-          ? `${error.message}\n${error.stack}` 
-          : String(error);
-          
+      const errorMessage = error instanceof Error
+        ? error.message
+        : String(error);
+
       return {
         content: [
           {
@@ -2118,15 +2103,26 @@ registerTool(
   "delete-doc",
   {
     docId: z.string().describe("The ID of the document to delete"),
+    confirm: z.boolean().describe("Must be true to confirm permanent deletion. Fetch the document title first so the user knows what will be deleted."),
   },
-  async ({ docId }) => {
+  async ({ docId, confirm }) => {
     try {
-      // Get the document title first for confirmation
-      const doc = await docsClient.documents.get({ documentId: docId });
+      const { docs, drive } = getClients();
+      // Get the document title first so the caller (and the user) knows what will be deleted
+      const doc = await docs.documents.get({ documentId: docId });
       const title = doc.data.title;
-      
+
+      if (!confirm) {
+        return {
+          content: [{
+            type: "text",
+            text: `Document to be deleted: "${title}" (ID: ${docId}).\nTo permanently delete it, call delete-doc again with confirm: true.`,
+          }],
+        };
+      }
+
       // Delete the document
-      await driveClient.files.delete({
+      await drive.files.delete({
         fileId: docId,
       });
 
@@ -2159,7 +2155,8 @@ registerTool(
   {},
   async () => {
     try {
-      const response = await driveClient.files.list({
+      const { docs, drive } = getClients();
+      const response = await drive.files.list({
         q: "mimeType='application/vnd.google-apps.document'",
         fields: "files(id, name, createdTime, modifiedTime)",
         pageSize: 50,
@@ -2170,7 +2167,7 @@ registerTool(
 
       const files = response.data.files || [];
       let content = "Google Docs in your Drive:\n\n";
-      
+
       if (files.length === 0) {
         content += "No Google Docs found.";
       } else {
@@ -2180,6 +2177,9 @@ registerTool(
           content += `Created: ${file.createdTime}\n`;
           content += `Last Modified: ${file.modifiedTime}\n\n`;
         });
+        if (files.length >= 50) {
+          content += "\nNote: Results are limited to 50. Use search-docs with a query to narrow results.";
+        }
       }
 
       return {
@@ -2215,7 +2215,8 @@ registerTool(
   },
   async ({ docId, includeOutline = true, includeStats = true }) => {
     try {
-      const doc = await docsClient.documents.get({
+      const { docs } = getClients();
+      const doc = await docs.documents.get({
         documentId: docId,
         includeTabsContent: true,
       } as any);
@@ -2267,7 +2268,8 @@ registerTool(
   },
   async ({ docId }) => {
     try {
-      const doc = await docsClient.documents.get({
+      const { docs } = getClients();
+      const doc = await docs.documents.get({
         documentId: docId,
         includeTabsContent: false,
       } as any);
@@ -2305,7 +2307,8 @@ registerTool(
   },
   async ({ docId, tabId }) => {
     try {
-      const doc = await docsClient.documents.get({
+      const { docs } = getClients();
+      const doc = await docs.documents.get({
         documentId: docId,
         includeTabsContent: true,
       } as any);
@@ -2340,7 +2343,8 @@ registerTool(
   },
   async ({ docId }) => {
     try {
-      const doc = await docsClient.documents.get({ documentId: docId });
+      const { docs } = getClients();
+      const doc = await docs.documents.get({ documentId: docId });
       const outline = extractOutlineFromDoc(doc.data);
       let text = `Outline for "${doc.data.title}":\n\n`;
       text += formatOutlineText(outline);
@@ -2361,7 +2365,8 @@ registerTool(
   },
   async ({ docId }) => {
     try {
-      const doc = await docsClient.documents.get({ documentId: docId });
+      const { docs } = getClients();
+      const doc = await docs.documents.get({ documentId: docId });
       const text = extractTextFromBody(doc.data.body);
       const outline = extractOutlineFromDoc(doc.data);
       const stats = computeDocStats(text, outline);
@@ -2393,9 +2398,11 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
       const index = await resolveInsertIndex(documentId, params);
-      const prefix = params.beforeText || params.afterHeading ? "\n" : "";
+      const prefix = params.beforeText ? "\n" : "";
       await insertTextAtIndex(documentId, index, prefix + params.content);
       return {
         content: [{ type: "text", text: `Inserted text at index ${index} in document ${params.docId}.` }],
@@ -2419,6 +2426,8 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
       const index = await resolveInsertIndex(documentId, params);
       await insertPageBreakAtIndex(documentId, index);
@@ -2444,6 +2453,8 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
       const summary = await insertSceneBreak(params.docId.toString(), params);
       return { content: [{ type: "text", text: `${summary} in document ${params.docId}.` }] };
     } catch (error) {
@@ -2467,6 +2478,8 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
       const summary = await createListInDocument(params.docId.toString(), params.items, params);
       return { content: [{ type: "text", text: `${summary} in document ${params.docId}.` }] };
     } catch (error) {
@@ -2487,6 +2500,8 @@ registerTool(
   },
   async ({ docId, preset, findText, matchCase }) => {
     try {
+      const { docs } = getClients();
+      if (!docId) throw new Error("Document ID is required");
       const summary = await applyStylePresetToDocument(docId.toString(), preset, {
         findText,
         matchCase,
@@ -2511,10 +2526,12 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
+      if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
       const ranges = await resolveTextRanges(documentId, params);
       const requests = buildClearFormattingRequests(ranges);
-      await docsClient.documents.batchUpdate({ documentId, requestBody: { requests } });
+      await docs.documents.batchUpdate({ documentId, requestBody: { requests } });
       return {
         content: [
           { type: "text", text: `Cleared formatting on ${ranges.length} range(s) in document ${params.docId}.` },
@@ -2539,6 +2556,7 @@ registerTool(
   },
   async (params) => {
     try {
+      const { docs } = getClients();
       const { docId, title, subtitle, author, course, instructor, date } = params;
       const summary = await generateTitlePageContent(docId.toString(), {
         title,
@@ -2563,7 +2581,8 @@ registerTool(
   },
   async ({ docId, newTitle }) => {
     try {
-      await driveClient.files.update({
+      const { docs, drive } = getClients();
+      await drive.files.update({
         fileId: docId,
         requestBody: { name: newTitle },
       });
@@ -2582,7 +2601,8 @@ registerTool(
   },
   async ({ docId, newTitle }) => {
     try {
-      const copy = await driveClient.files.copy({
+      const { docs, drive } = getClients();
+      const copy = await drive.files.copy({
         fileId: docId,
         requestBody: { name: newTitle },
       });
@@ -2609,22 +2629,22 @@ registerTool(
   },
   async ({ docId, format = "pdf", outputPath }) => {
     try {
+      const { docs, drive } = getClients();
       const mimeTypes: Record<string, string> = {
         pdf: "application/pdf",
         docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         txt: "text/plain",
         html: "text/html",
       };
-      const ext = format;
       const exportDir = path.join(PROJECT_ROOT, "exports");
       if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
 
-      const doc = await docsClient.documents.get({ documentId: docId });
+      const doc = await docs.documents.get({ documentId: docId });
       const safeName = (doc.data.title || "document").replace(/[<>:"/\\|?*]/g, "_");
       const dest =
-        outputPath || path.join(exportDir, `${safeName}.${ext}`);
+        outputPath || path.join(exportDir, `${safeName}.${format}`);
 
-      const res = await driveClient.files.export(
+      const res = await drive.files.export(
         { fileId: docId, mimeType: mimeTypes[format] },
         { responseType: "arraybuffer" }
       );
@@ -2645,7 +2665,8 @@ registerTool(
   },
   async ({ docId }) => {
     try {
-      const res = await driveClient.comments.list({
+      const { docs, drive } = getClients();
+      const res = await drive.comments.list({
         fileId: docId,
         fields: "comments(id,content,author,createdTime,quotedFileContent)",
         pageSize: 50,
@@ -2662,6 +2683,9 @@ registerTool(
         }
         text += `   ${c.content}\n\n`;
       });
+      if (comments.length >= 50) {
+        text += "Note: Results are limited to 50 comments. Older comments may not be shown.\n";
+      }
       return { content: [{ type: "text", text }] };
     } catch (error) {
       return { content: [{ type: "text", text: `Error listing comments: ${error}` }], isError: true };
@@ -2675,7 +2699,7 @@ async function resolveQuotedTextFromDoc(
   matchCase: boolean,
   occurrenceIndex: number
 ): Promise<{ exactQuote: string; startIndex: number; length: number } | null> {
-  const doc = await docsClient.documents.get({ documentId });
+  const doc = await getClients().docs.documents.get({ documentId });
   const ranges = findTextRanges(doc.data, quotedText, matchCase);
   if (!ranges.length || occurrenceIndex < 0 || occurrenceIndex >= ranges.length) return null;
   const range = ranges[occurrenceIndex];
@@ -2697,6 +2721,7 @@ registerTool(
   },
   async ({ docId, content, quotedText, matchCase = true, occurrenceIndex = 0 }) => {
     try {
+      const { docs, drive } = getClients();
       const requestBody: drive_v3.Schema$Comment = { content };
       let anchorNote = "";
 
@@ -2709,7 +2734,7 @@ registerTool(
         );
         const quote = resolved?.exactQuote ?? quotedText;
         requestBody.quotedFileContent = {
-          mimeType: "text/html",
+          mimeType: "text/plain",
           value: quote,
         };
         if (resolved) {
@@ -2722,7 +2747,7 @@ registerTool(
         }
       }
 
-      const res = await driveClient.comments.create({
+      const res = await drive.comments.create({
         fileId: docId,
         fields: "id,content,createdTime,anchor,quotedFileContent",
         requestBody,
@@ -2757,6 +2782,7 @@ registerTool(
   },
   async ({ docId, findText, note, occurrenceIndex = 0, matchCase = true }) => {
     try {
+      const { docs } = getClients();
       const documentId = docId.toString();
       const ranges = await resolveTextRanges(documentId, {
         findText,
@@ -2768,7 +2794,7 @@ registerTool(
       await insertTextAtIndex(documentId, insertAt, noteText);
       const noteStart = insertAt;
       const noteEnd = insertAt + noteText.length;
-      await docsClient.documents.batchUpdate({
+      await docs.documents.batchUpdate({
         documentId,
         requestBody: {
           requests: buildTextStyleRequests(
@@ -2799,7 +2825,7 @@ registerTool(
 // Prompt for document creation
 registerPrompt(
   "create-doc-template",
-  { 
+  {
     title: z.string().describe("The title for the new document"),
     subject: z.string().describe("The subject/topic the document should be about"),
     style: z.string().describe("The writing style (e.g., formal, casual, academic)"),
@@ -2818,7 +2844,7 @@ registerPrompt(
 // Prompt for document analysis
 registerPrompt(
   "analyze-doc",
-  { 
+  {
     docId: z.string().describe("The ID of the document to analyze"),
   },
   ({ docId }) => ({
@@ -2901,12 +2927,17 @@ registerPrompt(
 
 // Connect to the transport and start the server
 async function main() {
+  const success = await initClients();
+  if (!success) {
+    console.error("Failed to initialize Google API clients. Server will not work correctly.");
+  }
+
   // Create a transport for communicating over stdin/stdout
   const transport = new StdioServerTransport();
 
   // Connect the server to the transport
   await server.connect(transport);
-  
+
   console.error("Google Docs MCP Server running on stdio");
 }
 
