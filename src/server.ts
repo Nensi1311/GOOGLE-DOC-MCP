@@ -778,6 +778,7 @@ type DocumentEditOperation =
     foregroundColor?: string;
     bold?: boolean;
     italic?: boolean;
+    confirmBulkEdit?: boolean;
   }
   | {
     type: "insertText";
@@ -907,8 +908,8 @@ async function applyDocumentEdit(
       const index = await resolveInsertIndex(documentId, operation);
       // Append a trailing newline when inserting before existing text so the
       // new content ends up on its own line rather than merged with the target.
-      const prefix = operation.beforeText ? "\n" : "";
-      await insertTextAtIndex(documentId, index, prefix + operation.content);
+      const suffix = operation.beforeText ? "\n" : "";
+      await insertTextAtIndex(documentId, index, operation.content + suffix);
       return `Inserted text at index ${index}`;
     }
     case "insertPageBreak": {
@@ -2155,7 +2156,7 @@ registerTool(
   {},
   async () => {
     try {
-      const { docs, drive } = getClients();
+      const { drive } = getClients();
       const response = await drive.files.list({
         q: "mimeType='application/vnd.google-apps.document'",
         fields: "files(id, name, createdTime, modifiedTime)",
@@ -2395,15 +2396,27 @@ registerTool(
     afterText: z.string().optional().describe("Insert after this text"),
     matchCase: z.boolean().optional(),
     occurrenceIndex: z.number().optional(),
+    append: z.boolean().optional(),
   },
   async (params) => {
     try {
       const { docs } = getClients();
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
-      const index = await resolveInsertIndex(documentId, params);
-      const prefix = params.beforeText ? "\n" : "";
-      await insertTextAtIndex(documentId, index, prefix + params.content);
+      let index: number;
+      let textToInsert = params.content;
+      if (params.append) {
+        const doc = await docs.documents.get({ documentId });
+        index = getBodyEndIndex(doc.data) - 1;
+        if (index > 1 && !textToInsert.startsWith("\n")) {
+          textToInsert = "\n" + textToInsert;
+        }
+      } else {
+        index = await resolveInsertIndex(documentId, params);
+        const suffix = params.beforeText ? "\n" : "";
+        textToInsert = textToInsert + suffix;
+      }
+      await insertTextAtIndex(documentId, index, textToInsert);
       return {
         content: [{ type: "text", text: `Inserted text at index ${index} in document ${params.docId}.` }],
       };
@@ -2423,13 +2436,20 @@ registerTool(
     afterText: z.string().optional(),
     matchCase: z.boolean().optional(),
     occurrenceIndex: z.number().optional(),
+    append: z.boolean().optional(),
   },
   async (params) => {
     try {
       const { docs } = getClients();
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
-      const index = await resolveInsertIndex(documentId, params);
+            let index: number;
+      if (params.append) {
+        const doc = await docs.documents.get({ documentId });
+        index = getBodyEndIndex(doc.data) - 1;
+      } else {
+        index = await resolveInsertIndex(documentId, params);
+      }
       await insertPageBreakAtIndex(documentId, index);
       return {
         content: [{ type: "text", text: `Inserted page break at index ${index} in document ${params.docId}.` }],
@@ -2581,7 +2601,7 @@ registerTool(
   },
   async ({ docId, newTitle }) => {
     try {
-      const { docs, drive } = getClients();
+      const { drive } = getClients();
       await drive.files.update({
         fileId: docId,
         requestBody: { name: newTitle },
@@ -2601,7 +2621,7 @@ registerTool(
   },
   async ({ docId, newTitle }) => {
     try {
-      const { docs, drive } = getClients();
+      const { drive } = getClients();
       const copy = await drive.files.copy({
         fileId: docId,
         requestBody: { name: newTitle },
@@ -2665,7 +2685,7 @@ registerTool(
   },
   async ({ docId }) => {
     try {
-      const { docs, drive } = getClients();
+      const { drive } = getClients();
       const res = await drive.comments.list({
         fileId: docId,
         fields: "comments(id,content,author,createdTime,quotedFileContent)",
@@ -2721,7 +2741,7 @@ registerTool(
   },
   async ({ docId, content, quotedText, matchCase = true, occurrenceIndex = 0 }) => {
     try {
-      const { docs, drive } = getClients();
+      const { drive } = getClients();
       const requestBody: drive_v3.Schema$Comment = { content };
       let anchorNote = "";
 
@@ -2866,6 +2886,9 @@ registerTool(
     height: z.number().optional().describe("Height in points (optional)"),
     beforeText: z.string().optional().describe("Insert before this text"),
     afterHeading: z.string().optional().describe("Insert after this heading"),
+    afterText: z.string().optional().describe("Insert after this text"),
+    index: z.number().optional().describe("Insert at exact 1-based index"),
+    append: z.boolean().optional().describe("Append to end of document")
   },
   async (params) => {
     try {
@@ -2873,11 +2896,17 @@ registerTool(
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
 
-      const index = await resolveInsertIndex(documentId, params);
+            let index: number;
+      if (params.append) {
+        const doc = await docs.documents.get({ documentId });
+        index = getBodyEndIndex(doc.data) - 1;
+      } else {
+        index = await resolveInsertIndex(documentId, params);
+      }
 
       const size: any = {};
-      if (params.width) size.width = { magnitude: params.width, unit: "PT" };
-      if (params.height) size.height = { magnitude: params.height, unit: "PT" };
+      if (params.width !== undefined) size.width = { magnitude: params.width, unit: "PT" };
+      if (params.height !== undefined) size.height = { magnitude: params.height, unit: "PT" };
 
       await docs.documents.batchUpdate({
         documentId,
@@ -2887,7 +2916,7 @@ registerTool(
               insertInlineImage: {
                 location: { index },
                 uri: params.url,
-                objectSize: (params.width || params.height) ? size : undefined,
+                objectSize: (params.width !== undefined || params.height !== undefined) ? size : undefined,
               },
             },
           ],
@@ -2916,6 +2945,9 @@ registerTool(
     columns: z.number().min(1).describe("Number of columns"),
     beforeText: z.string().optional().describe("Insert before this text"),
     afterHeading: z.string().optional().describe("Insert after this heading"),
+    afterText: z.string().optional().describe("Insert after this text"),
+    index: z.number().optional().describe("Insert at exact 1-based index"),
+    append: z.boolean().optional().describe("Append to end of document")
   },
   async (params) => {
     try {
@@ -2923,7 +2955,13 @@ registerTool(
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
 
-      const index = await resolveInsertIndex(documentId, params);
+            let index: number;
+      if (params.append) {
+        const doc = await docs.documents.get({ documentId });
+        index = getBodyEndIndex(doc.data) - 1;
+      } else {
+        index = await resolveInsertIndex(documentId, params);
+      }
 
       await docs.documents.batchUpdate({
         documentId,
@@ -2963,6 +3001,9 @@ registerTool(
     text: z.string().describe("Text of the footnote"),
     beforeText: z.string().optional().describe("Insert before this text"),
     afterHeading: z.string().optional().describe("Insert after this heading"),
+    afterText: z.string().optional().describe("Insert after this text"),
+    index: z.number().optional().describe("Insert at exact 1-based index"),
+    append: z.boolean().optional().describe("Append to end of document")
   },
   async (params) => {
     try {
@@ -2970,7 +3011,13 @@ registerTool(
       if (!params.docId) throw new Error("Document ID is required");
       const documentId = params.docId.toString();
 
-      const index = await resolveInsertIndex(documentId, params);
+            let index: number;
+      if (params.append) {
+        const doc = await docs.documents.get({ documentId });
+        index = getBodyEndIndex(doc.data) - 1;
+      } else {
+        index = await resolveInsertIndex(documentId, params);
+      }
 
       const response = await docs.documents.batchUpdate({
         documentId,
@@ -3024,6 +3071,7 @@ registerTool(
   {
     docId: z.string().describe("Document ID"),
     text: z.string().describe("Text of the header"),
+    alignment: z.enum(["START", "CENTER", "END", "JUSTIFIED"]).optional().describe("Alignment of the header (default: START)"),
   },
   async (params) => {
     try {
@@ -3034,10 +3082,21 @@ registerTool(
       // We must fetch the doc to see if a header already exists
       const doc = await docs.documents.get({ documentId });
       let headerId = "";
+      const requests: any[] = [];
 
       if (doc.data.documentStyle?.defaultHeaderId) {
         headerId = doc.data.documentStyle.defaultHeaderId;
-        // Optional: clear existing header text by deleting its content (can be complex if there are multiple elements)
+        const header = doc.data.headers?.[headerId];
+        if (header && header.content) {
+          const lastElement = header.content[header.content.length - 1];
+          if (lastElement && lastElement.endIndex && lastElement.endIndex > 2) {
+            requests.push({
+              deleteContentRange: {
+                range: { segmentId: headerId, startIndex: 1, endIndex: lastElement.endIndex - 1 }
+              }
+            });
+          }
+        }
       } else {
         const response = await docs.documents.batchUpdate({
           documentId,
@@ -3056,27 +3115,23 @@ registerTool(
 
       if (!headerId) throw new Error("Failed to resolve or create header.");
 
-      // For simplicity, we just insert the text at index 1 of the header.
-      // If it already had text, this will prepend.
+      requests.push({
+        insertText: {
+          location: { segmentId: headerId, index: 1 },
+          text: params.text + "\n",
+        },
+      });
+      requests.push({
+        updateParagraphStyle: {
+          range: { segmentId: headerId, startIndex: 1, endIndex: params.text.length + 1 },
+          paragraphStyle: { alignment: params.alignment || "START" },
+          fields: "alignment"
+        }
+      });
+
       await docs.documents.batchUpdate({
         documentId,
-        requestBody: {
-          requests: [
-            {
-              insertText: {
-                location: { segmentId: headerId, index: 1 },
-                text: params.text + "\n",
-              },
-            },
-            {
-              updateParagraphStyle: {
-                range: { segmentId: headerId, startIndex: 1, endIndex: 2 },
-                paragraphStyle: { alignment: "END" }, // Usually headers are right-aligned
-                fields: "alignment"
-              }
-            }
-          ],
-        },
+        requestBody: { requests },
       });
 
       return {
@@ -3098,6 +3153,7 @@ registerTool(
   {
     docId: z.string().describe("Document ID"),
     text: z.string().describe("Text of the footer"),
+    alignment: z.enum(["START", "CENTER", "END", "JUSTIFIED"]).optional().describe("Alignment of the footer (default: CENTER)"),
   },
   async (params) => {
     try {
@@ -3107,9 +3163,21 @@ registerTool(
 
       const doc = await docs.documents.get({ documentId });
       let footerId = "";
+      const requests: any[] = [];
 
       if (doc.data.documentStyle?.defaultFooterId) {
         footerId = doc.data.documentStyle.defaultFooterId;
+        const footer = doc.data.footers?.[footerId];
+        if (footer && footer.content) {
+          const lastElement = footer.content[footer.content.length - 1];
+          if (lastElement && lastElement.endIndex && lastElement.endIndex > 2) {
+            requests.push({
+              deleteContentRange: {
+                range: { segmentId: footerId, startIndex: 1, endIndex: lastElement.endIndex - 1 }
+              }
+            });
+          }
+        }
       } else {
         const response = await docs.documents.batchUpdate({
           documentId,
@@ -3128,25 +3196,23 @@ registerTool(
 
       if (!footerId) throw new Error("Failed to resolve or create footer.");
 
+      requests.push({
+        insertText: {
+          location: { segmentId: footerId, index: 1 },
+          text: params.text + "\n",
+        },
+      });
+      requests.push({
+        updateParagraphStyle: {
+          range: { segmentId: footerId, startIndex: 1, endIndex: params.text.length + 1 },
+          paragraphStyle: { alignment: params.alignment || "CENTER" },
+          fields: "alignment"
+        }
+      });
+
       await docs.documents.batchUpdate({
         documentId,
-        requestBody: {
-          requests: [
-            {
-              insertText: {
-                location: { segmentId: footerId, index: 1 },
-                text: params.text + "\n",
-              },
-            },
-            {
-              updateParagraphStyle: {
-                range: { segmentId: footerId, startIndex: 1, endIndex: 2 },
-                paragraphStyle: { alignment: "CENTER" }, // Usually footers are centered
-                fields: "alignment"
-              }
-            }
-          ],
-        },
+        requestBody: { requests },
       });
 
       return {
