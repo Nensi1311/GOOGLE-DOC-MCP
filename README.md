@@ -78,7 +78,7 @@ npm start
 |------|---------|
 | `create-doc` | New document |
 | `update-doc` | Append, replace entire doc, or find-and-replace |
-| `insert-text` | Insert at index, after heading, before/after text |
+| `insert-text` | Insert at index, after heading, before/after text or append |
 | **`edit-document`** | **All-in-one** — chain multiple operations in one call |
 | `rename-doc` / `copy-doc` | Rename or duplicate |
 | `delete-doc` | Delete document |
@@ -107,7 +107,7 @@ npm start
 | Tool | Purpose |
 |------|---------|
 | `create-list` | Bullet or numbered lists |
-| `insert-page-break` | Page break before References, new chapter, etc. |
+| `insert-page-break` | Page break before References, new chapter, etc. (supports append) |
 | `insert-scene-break` | Page break or centered `* * *` between sections |
 
 ### Collaboration & export
@@ -267,4 +267,4 @@ These are **not supported** by the Google Docs/Drive APIs (or are unreliable), s
 
 ## Security
 
-Never commit `credentials.json`, `token.json`, or exported files with sensitive content. All are in `.gitignore`.
+Never commit `credentials.json`, `token.json` or exported files with sensitive content. All are in `.gitignore`.

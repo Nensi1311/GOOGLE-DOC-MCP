@@ -17,19 +17,19 @@ Entry point: `build/server.js`. Requires `credentials.json` + `token.json` (OAut
 
 Single-file MCP server (`src/server.ts`) — Google Docs/Drive over stdio. OAuth via `@google-cloud/local-auth`; tokens in `token.json`.
 
-### Tools (writer/student focused)
+### Tools
 
 **Read:** `get-doc`, `get-outline`, `get-doc-stats`, `list-docs`, `search-docs`, `list-tabs`, `get-tab`
 
-**Write:** `create-doc`, `update-doc`, `insert-text`, `edit-document`, `rename-doc`, `copy-doc`, `delete-doc`
+**Write:** `create-doc`, `update-doc`, `insert-text`, `edit-document`, `rename-doc`, `copy-doc`, `delete-doc`, `insert-image`, `insert-table`, `insert-footnote`
 
-**Format:** `format-text`, `format-paragraph`, `clear-formatting`, `apply-preset`, `generate-title-page`
+**Format:** `format-text`, `format-paragraph`, `clear-formatting`, `apply-preset`, `generate-title-page`, `set-header`, `set-footer`
 
 **Structure:** `create-list`, `insert-page-break`, `insert-scene-break`
 
-**Collaboration:** `list-comments`, `add-comment`, `insert-review-note`, `export-doc`
+**Collaboration:** `list-comments`, `add-comment`, `insert-review-note`, `export-doc`, `share-doc`
 
-**Prompts:** `create-doc-template`, `analyze-doc`, `format-academic-essay`, `polish-prose`, `create-outline-from-topic`, `bibliography-check`
+**Prompts:** `create-doc-template`, `analyze-doc`, `format-academic-essay`, `polish-prose`, `create-outline-from-topic`, `bibliography-check`, `format-professional-report`, `collaborative-review-setup`
 
 ### Key design choices
 
@@ -80,7 +80,3 @@ Inline margin comments on text (use `insert-review-note` for visible in-doc feed
   }
 }
 ```
-
-## Future: Vector RAG (planned, not built)
-
-Target: support agents querying docs via Bedrock embeddings + OpenSearch. Modules `src/chunker.ts`, `src/bedrock.ts`, etc. are planned — not in current `server.ts`.
